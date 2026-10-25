@@ -21,7 +21,7 @@
 
 -- =============================== CONFIG ===============================
 local ALLOWED_USER_IDS = {
-	-- 1234567890,   <-- YOUR UserId. Empty list = any player may request the dump.
+	  10148033407,   <-- YOUR UserId. Empty list = any player may request the dump.
 }
 
 local TARGETS = { "ServerStorage", "ServerScriptService" }  -- what the client may request
@@ -417,6 +417,42 @@ end
 -- <<< DEXDUMP SERIALIZER END
 
 -- ======================================================================
+--              TREE DESCRIPTION (class + name only, for the Explorer)
+-- ======================================================================
+-- The .rbxmx export contains every property. This is the lightweight version:
+-- just the structure, so Dex can rebuild it locally and you can click through it.
+local function buildTreeDescription(inst, depth, maxDepth, counter)
+	counter[1] = counter[1] + 1
+	local node = { c = inst.ClassName, n = inst.Name }
+	if depth < maxDepth then
+		local kids = inst:GetChildren()
+		if #kids > 0 then
+			local list = {}
+			for _, child in ipairs(kids) do
+				list[#list + 1] = buildTreeDescription(child, depth + 1, maxDepth, counter)
+			end
+			node.k = list
+		end
+	end
+	return node
+end
+
+-- character-level robustness: replace bytes that JSON encoders choke on
+local function sanitizeString(text)
+	return (tostring(text):gsub("[%z\1-\8\11\12\14-\31\127]", "?"))
+end
+
+local function sanitizeTree(node)
+	node.n = sanitizeString(node.n)
+	if node.k then
+		for _, child in ipairs(node.k) do
+			sanitizeTree(child)
+		end
+	end
+	return node
+end
+
+-- ======================================================================
 --                          SERVER PLUMBING
 -- ======================================================================
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -451,9 +487,10 @@ end
 local busy = false
 
 remote.OnServerEvent:Connect(function(player, action, targetName)
-	if action ~= "request" then
+	if action ~= "request" and action ~= "requesttree" then
 		return
 	end
+	local isTree = (action == "requesttree")
 	if not isAllowed(player) then
 		remote:FireClient(player, "denied", targetName, "this dump is locked to its owner")
 		warn("[DexDump] denied " .. player.Name .. " (" .. player.UserId .. ")")
@@ -481,7 +518,50 @@ remote.OnServerEvent:Connect(function(player, action, targetName)
 	end
 
 	busy = true
-	print("[DexDump] " .. player.Name .. " requested " .. targetName .. " ...")
+	print("[DexDump] " .. player.Name .. " requested " .. targetName .. (isTree and " (tree)" or "") .. " ...")
+
+	-- lightweight structure-only stream for the in-Dex Explorer view
+	if isTree then
+		task.spawn(function()
+			remote:FireClient(player, "treeBegin", targetName)
+			task.wait()
+
+			local counter = { 0 }
+			local okBuild, description = pcall(function()
+				local tree = buildTreeDescription(service, 0, 200, counter)
+				return sanitizeTree(tree)
+			end)
+			if not okBuild then
+				busy = false
+				warn("[DexDump] tree build failed: " .. tostring(description))
+				remote:FireClient(player, "error", targetName, tostring(description))
+				return
+			end
+
+			local okJson, json = pcall(function()
+				return game:GetService("HttpService"):JSONEncode(description)
+			end)
+			if not okJson then
+				busy = false
+				warn("[DexDump] tree encode failed: " .. tostring(json))
+				remote:FireClient(player, "error", targetName, tostring(json))
+				return
+			end
+
+			local offset, length = 1, #json
+			while offset <= length do
+				local chunk = string.sub(json, offset, offset + CHUNK_SIZE - 1)
+				remote:FireClient(player, "treeChunk", targetName, chunk)
+				offset = offset + CHUNK_SIZE
+				task.wait()
+			end
+
+			busy = false
+			remote:FireClient(player, "treeDone", targetName, counter[1])
+			print(string.format("[DexDump] %s tree sent: %d instances, %.1f KB", targetName, counter[1], length / 1024))
+		end)
+		return
+	end
 
 	task.spawn(function()
 		remote:FireClient(player, "begin", targetName)
