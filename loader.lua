@@ -4,9 +4,9 @@
 ]]
 
 local URLS = {
-	"https://raw.githubusercontent.com/nexusstudiosevior-rgb/DexExplorerPlus/main/out.lua",
-	"https://cdn.jsdelivr.net/gh/nexusstudiosevior-rgb/DexExplorerPlus@main/out.lua",
-	"https://github.com/nexusstudiosevior-rgb/DexExplorerPlus/releases/latest/download/out.lua",
+	"https://raw.githubusercontent.com/nexusstudioserver-rgb/DexExplorerPlus/main/out.lua",
+	"https://cdn.jsdelivr.net/gh/nexusstudioserver-rgb/DexExplorerPlus@main/out.lua",
+	"https://github.com/nexusstudioserver-rgb/DexExplorerPlus/releases/latest/download/out.lua",
 }
 
 local function log(...)
@@ -42,12 +42,31 @@ for _, url in ipairs(URLS) do
 	local ok, body = pcall(function()
 		return game:HttpGet(url, true)
 	end)
-	if ok and type(body) == "string" and #body > 5000 and body:find("Dex", 1, true) then
+	local looksLikeLua = ok
+		and type(body) == "string"
+		and #body > 5000
+		and body:sub(1, 1) ~= "<"                 -- HTML error page, not Lua
+		and not body:lower():find("<!doctype", 1, true)
+		and body:find("Dex", 1, true) ~= nil
+
+	if looksLikeLua then
 		source, usedUrl = body, url
 		log(string.format("downloaded OK: %.0f KB from %s", #body / 1024, url))
 		break
 	else
-		log("failed:", url, "->", ok and ("got " .. type(body) .. " " .. tostring(#body or body):sub(1, 40)) or tostring(body):sub(1, 120))
+		local why
+		if not ok then
+			why = tostring(body):sub(1, 120)
+		elseif type(body) ~= "string" then
+			why = "got " .. type(body)
+		elseif #body < 5000 then
+			why = "too short (" .. #body .. " bytes)"
+		elseif body:sub(1, 1) == "<" then
+			why = string.format("%.0f KB of HTML (404 / error page), not Lua", #body / 1024)
+		else
+			why = "does not look like Dex++"
+		end
+		log("failed:", url, "->", why)
 	end
 end
 
