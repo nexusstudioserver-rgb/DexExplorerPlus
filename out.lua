@@ -887,6 +887,7 @@ local function main()
 	local getTextSize = service.TextService.GetTextSize
 	local updateDebounce,refreshDebounce = false,false
 	local nilNode = {Obj = Instance.new("Folder")}
+	local dumpRoots = {} -- extra read-only roots fed by env.ServerDump (ServerStorage dumps)
 	local idCounter = 0
 	local scrollV,scrollH,clipboard
 	local renameBox,renamingNode,searchFunc
@@ -1280,7 +1281,19 @@ local function main()
 			end
 		end
 
-		Explorer.MaxNameWidth = maxNameWidth
+			-- ServerStorage / ServerScriptService dumps loaded into the tree (read-only)
+		for i = 1, #dumpRoots do
+			local dumpNode = dumpRoots[i]
+			if not dumpNode.Del and not (isSearching and not searchResults[dumpNode]) then
+				tree[count] = dumpNode
+				count = count + 1
+				if expanded[dumpNode] then
+					recur(dumpNode,2)
+				end
+			end
+		end
+
+	Explorer.MaxNameWidth = maxNameWidth
 		Explorer.MaxDepth = maxDepth
 		Explorer.ViewWidth = useNameWidth and Explorer.EntryIndent*maxDepth + maxNameWidth + 26 or Explorer.EntryIndent*maxDepth + 226
 		Explorer.UpdateView()
@@ -3441,6 +3454,51 @@ return search]==]
 				par[#par+1] = newNode
 			end
 		end
+	end
+
+	-- Dex++ SERVER DUMP: show a dumped service inside the Explorer (read-only view)
+	-- rootObj must be a locally rebuilt Instance tree (see env.ServerDump.LoadTreeIntoExplorer)
+	Explorer.AddDumpRoot = function(rootObj, displayName)
+		if not rootObj then return end
+		if displayName then pcall(function() rootObj.Name = displayName end) end
+
+		local rootNode = nodes[rootObj] or {Obj = rootObj}
+		rootNode.Obj = rootObj
+		nodes[rootObj] = rootNode
+
+		local function index(obj, parentNode)
+			local node = nodes[obj]
+			if not node then
+				node = {Obj = obj}
+				nodes[obj] = node
+			end
+			node.Parent = parentNode
+			if parentNode and not table.find(parentNode, node) then
+				table.insert(parentNode, node)
+			end
+			node.Sorted = nil
+			for _, child in ipairs(obj:GetChildren()) do
+				index(child, node)
+			end
+		end
+		index(rootObj, nil)
+
+		if not table.find(dumpRoots, rootNode) then
+			table.insert(dumpRoots, rootNode)
+		end
+		expanded[rootNode] = true
+		pcall(Explorer.Update)
+		return rootNode
+	end
+
+	Explorer.ClearDumpRoots = function()
+		for i = #dumpRoots, 1, -1 do
+			local node = dumpRoots[i]
+			nodes[node.Obj] = nil
+			pcall(function() node.Obj:Destroy() end)
+			table.remove(dumpRoots, i)
+		end
+		pcall(Explorer.Update)
 	end
 
 	return Explorer
@@ -13396,6 +13454,55 @@ local function main()
 		AddServerDumpRow("Save ServerStorage (.rbxmx)", "ServerStorage")
 		AddServerDumpRow("Save ServerScriptService (.rbxmx)", "ServerScriptService")
 
+		-- "see what's inside" without leaving Dex: rebuilds the tree locally
+		local function AddServerTreeRow(labelText, targetName)
+			local row = Lib.Frame.new()
+			row.Gui.Parent = ListFrame
+			row.Gui.Transparency = 1
+			row.Gui.Size = UDim2.new(1, 0, 0, 20)
+
+			local rowLayout = Instance.new("UIListLayout")
+			rowLayout.Parent = row.Gui
+			rowLayout.FillDirection = Enum.FillDirection.Horizontal
+			rowLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+			rowLayout.Padding = UDim.new(0, 10)
+
+			local button = Lib.Button.new()
+			button.Gui.Parent = row.Gui
+			button.Gui.Size = UDim2.new(0, 150, 0, 18)
+			button.Text = labelText
+
+			button.OnClick:Connect(function()
+				if not env.ServerDump then return end
+				button:SetDisabled(true)
+				ServerDumpStatus.Gui.TextColor3 = Settings.Theme.Text
+				local started = env.ServerDump.LoadTreeIntoExplorer(targetName, {
+					OnStatus = function(text)
+						ServerDumpStatus.Gui.Text = text
+					end,
+					OnDone = function(_, count)
+						ServerDumpStatus.Gui.Text = string.format(
+							"%s loaded into the Explorer (%d instances) - look for '%s (dump)'",
+							targetName, count, targetName
+						)
+						button:SetDisabled(false)
+					end,
+					OnError = function(text)
+						ServerDumpStatus.Gui.Text = tostring(text)
+						ServerDumpStatus.Gui.TextColor3 = Settings.Theme.Important
+						button:SetDisabled(false)
+					end,
+				})
+				if not started then
+					button:SetDisabled(false)
+				end
+			end)
+			return button
+		end
+
+		AddServerTreeRow("Show ServerStorage in Explorer", "ServerStorage")
+		AddServerTreeRow("Show ServerScriptService in Explorer", "ServerScriptService")
+
 		-- keep the status fresh (the server half may start after Dex is already open)
 		task.spawn(function()
 			while window and window.Gui do
@@ -14947,6 +15054,125 @@ Main = (function()
 			return true
 		end
 
+
+		-- ---- rebuild the dumped tree as local Instances so it can be browsed in Dex ----
+		local function rebuild(node, parent)
+			local className = tostring(node.c or "Folder")
+			local ok, inst = pcall(Instance.new, className)
+			if not ok or not inst then
+				inst = Instance.new("Folder")
+				inst.Name = className .. " (not creatable)"
+			else
+				pcall(function()
+					inst.Name = tostring(node.n or className)
+				end)
+			end
+			pcall(function()
+				inst.Parent = parent
+			end)
+			local kids = node.k
+			if type(kids) == "table" then
+				for _, child in ipairs(kids) do
+					rebuild(child, inst)
+				end
+			end
+			return inst
+		end
+
+		-- downloads the tree description (class + name structure) and parents it
+		-- into a local folder, then shows it in the Explorer as its own root
+		function ServerDump.LoadTreeIntoExplorer(targetName, callbacks)
+			callbacks = callbacks or {}
+			local function fail(message)
+				if callbacks.OnError then pcall(callbacks.OnError, message) end
+				return false
+			end
+			if ServerDump.Running then
+				return fail("a dump is already running")
+			end
+			local remote = ServerDump.GetRemote()
+			if not remote then
+				return fail("server half not detected - put ServerDump_Server.lua in your game's ServerScriptService")
+			end
+
+			local target = tostring(targetName)
+			local parts, size = {}, 0
+			local connection
+			local finished = false
+
+			local function finish()
+				ServerDump.Running = nil
+				if connection then
+					connection:Disconnect()
+					connection = nil
+				end
+			end
+			local function status(text)
+				if callbacks.OnStatus then pcall(callbacks.OnStatus, text) end
+			end
+
+			ServerDump.Running = target
+			status("requesting " .. target .. " tree ...")
+
+			connection = remote.OnClientEvent:Connect(function(kind, name, data, extra)
+				if name ~= target or finished then return end
+
+				if kind == "treeBegin" then
+					parts, size = {}, 0
+					status("receiving tree ...")
+
+				elseif kind == "treeChunk" then
+					if type(data) == "string" then
+						parts[#parts + 1] = data
+						size = size + #data
+						status(string.format("receiving tree ... %.0f KB", size / 1024))
+					end
+
+				elseif kind == "treeDone" then
+					finished = true
+					local json = table.concat(parts)
+					parts = nil
+					local okDecode, tree = pcall(function()
+						return game:GetService("HttpService"):JSONDecode(json)
+					end)
+					finish()
+					if not okDecode or type(tree) ~= "table" then
+						return fail("could not decode the tree: " .. tostring(tree))
+					end
+
+					local holder = Instance.new("Folder")
+					holder.Name = target .. " (dump)"
+					local built = rebuild(tree, holder)
+
+					local explorer = Apps and Apps.Explorer
+					if not (explorer and explorer.AddDumpRoot) then
+						return fail("Explorer is not ready - open the Explorer window once, then retry")
+					end
+					explorer.AddDumpRoot(built, target .. " (dump)")
+					status("loaded " .. target .. " into the Explorer (read-only)")
+					warn("[Dex++] " .. target .. " dump is now browsable in the Explorer as '" .. target .. " (dump)'")
+					if callbacks.OnDone then pcall(callbacks.OnDone, built, tonumber(data) or 0) end
+
+				elseif kind == "error" then
+					finished = true
+					finish()
+					return fail("server error: " .. tostring(data))
+
+				elseif kind == "denied" then
+					finished = true
+					finish()
+					return fail("denied - add your UserId to ALLOWED_USER_IDS in ServerDump_Server.lua")
+
+				elseif kind == "busy" then
+					finished = true
+					finish()
+					return fail("server is busy with another dump, try again")
+				end
+			end)
+
+			remote:FireServer("requesttree", target)
+			return true
+		end
 		env.ServerDump = ServerDump
 		getgenv().DexServerDump = ServerDump
 	end
