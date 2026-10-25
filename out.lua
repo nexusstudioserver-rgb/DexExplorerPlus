@@ -13171,7 +13171,8 @@ local function main()
 		MaxThreads = 3,
 		ShowStatus = true,
 		IgnoreDefaultProps = true,
-		IsolateStarterPlayer = true
+		IsolateStarterPlayer = true,
+		IsolatePlayerGui = true -- Dex++: save the LocalPlayer GUI too (SynSaveInstance IsolateLocalPlayer)
 	}
 	
 	local function AddCheckbox(title, default)
@@ -13353,6 +13354,11 @@ local function main()
 		local IsolateStarterPlr = AddCheckbox("Isolate StarterPlayer", SaveInstanceArgs.IsolateStarterPlayer)
 		IsolateStarterPlr.OnInput:Connect(function()
 			SaveInstanceArgs.IsolateStarterPlayer = IsolateStarterPlr.Toggled
+		end)
+
+		local IsolatePlayerGui = AddCheckbox("Isolate PlayerGui (save LocalPlayer GUI)", SaveInstanceArgs.IsolatePlayerGui)
+		IsolatePlayerGui.OnInput:Connect(function()
+			SaveInstanceArgs.IsolatePlayerGui = IsolatePlayerGui.Toggled
 		end)
 		
 		local IgnoreDefaultProps = AddCheckbox("Ignore Default Properties", SaveInstanceArgs.IgnoreDefaultProps)
@@ -14884,14 +14890,23 @@ Main = (function()
 				local finalPath = fixSavePath(filepath, obj, { IsModel = isModel, Binary = binary })
 				ensureFolder(finalPath)
 
-				local notes = "saved as " .. finalPath
+				-- Dex++: "Isolate PlayerGui" — SynSaveInstance calls this IsolateLocalPlayer
+			-- (IsolatePlayerGui is only an alias for it). PlayerGui is not creatable, so we
+			-- also turn SaveNotCreatable on; the GUI lands in a Folder named "LocalPlayer".
+			local wantsPlayerGui = options["IsolatePlayerGui"] or options["IsolateLocalPlayer"] or options["SavePlayerGui"]
+			local forceSyn = false
+			if wantsPlayerGui and isModel == false then
+				forceSyn = true
+			end
+
+			local notes = "saved as " .. finalPath
 				local function done(result)
 					pcall(env.saveinstanceNotify, finalPath)
 					return result
 				end
 
 				-- 1) the executor's own saveinstance (fastest, best binary support)
-				if saveinstance then
+				if saveinstance and not forceSyn then
 					local s, result = pcall(saveinstance, obj, finalPath, options)
 					if s then return done(result) end
 					warn("[Dex++] built-in saveinstance failed (" .. tostring(result) .. "), using SynSaveInstance instead")
@@ -14917,6 +14932,12 @@ Main = (function()
 				ssiOptions["IsModel"] = isModel
 				ssiOptions["Binary"] = binary
 				ssiOptions["AvoidFileOverwrite"] = false -- we already picked the exact name
+
+				if wantsPlayerGui and isModel == false then
+					ssiOptions["IsolateLocalPlayer"] = true   -- PlayerGui inside a "LocalPlayer" Folder
+					ssiOptions["SaveNotCreatable"] = true
+					ssiOptions["IsolatePlayers"] = false       -- must stay off or SSI ignores IsolateLocalPlayer
+				end
 
 				local s, result = pcall(synsaveinstance, ssiOptions)
 				if not s then
@@ -15336,7 +15357,7 @@ Main = (function()
 			t.TextColor3 = Color3.new(1,1,1)
 			t.TextWrapped = true
 			t.TextScaled = true
-			t.Text = "\n\n\n\n\n\n\n\nHello Skidsploit user,\nZinnia, Chillz and the Secret Service does not approve of Dex being used on your skidsploit.\nPlease consider getting something better.\n\nIncompatible Reason: "..reason.."\n\n\n\n\n\n\n\n"
+			t.Text = "\n\n\n\n\n\n\n\nHello Skidsploit user,\nZinnia, Vinskie and the Secret Service does not approve of Dex being used on your skidsploit.\nPlease consider getting something better.\n\nIncompatible Reason: "..reason.."\n\n\n\n\n\n\n\n"
 			
 			-- This sound wont work!!!
 			local sound = Instance.new("Sound",msg)
@@ -15779,7 +15800,7 @@ Main = (function()
 			{8,"Frame",{BackgroundColor3=Color3.new(0.20392157137394,0.20392157137394,0.20392157137394),BorderSizePixel=0,Name="ProgressBar",Parent={3},Position=UDim2.new(0,110,0,145),Size=UDim2.new(0,0,0,4),}},
 			{9,"Frame",{BackgroundColor3=Color3.new(0.2392156869173,0.56078433990479,0.86274510622025),BorderSizePixel=0,Name="Bar",Parent={8},Size=UDim2.new(0,0,1,0),}},
 			{10,"ImageLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Image="rbxassetid://2764171053",ImageColor3=Color3.new(0.17647059261799,0.17647059261799,0.17647059261799),Parent={8},ScaleType=1,Size=UDim2.new(1,0,1,0),SliceCenter=Rect.new(2,2,254,254),}},
-			{11,"TextLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Font=3,Name="Creator",Parent={2},Position=UDim2.new(1,-110,1,-20),Size=UDim2.new(0,105,0,20),Text="Developed by Chillz.",TextColor3=Color3.new(1,1,1),TextSize=14,TextXAlignment=1,}},
+			{11,"TextLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Font=3,Name="Creator",Parent={2},Position=UDim2.new(1,-110,1,-20),Size=UDim2.new(0,105,0,20),Text="Developed by Vinskie.",TextColor3=Color3.new(1,1,1),TextSize=14,TextXAlignment=1,}},
 			{12,"UIGradient",{Parent={11},Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1,0),NumberSequenceKeypoint.new(1,1,0),}),}},
 			{13,"TextLabel",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,Font=3,Name="Version",Parent={2},Position=UDim2.new(1,-110,1,-35),Size=UDim2.new(0,105,0,20),Text=Main.Version,TextColor3=Color3.new(1,1,1),TextSize=14,TextXAlignment=1,}},
 			{14,"UIGradient",{Parent={13},Transparency=NumberSequence.new({NumberSequenceKeypoint.new(0,1,0),NumberSequenceKeypoint.new(1,1,0),}),}},
