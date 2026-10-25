@@ -21,7 +21,7 @@
 
 -- =============================== CONFIG ===============================
 local ALLOWED_USER_IDS = {
-	  10148033407,   <-- YOUR UserId. Empty list = any player may request the dump.
+	10148033407, -- you (nexus)
 }
 
 local TARGETS = { "ServerStorage", "ServerScriptService" }  -- what the client may request
