@@ -13168,11 +13168,13 @@ local function main()
 		NilInstances = false,
 		RemovePlayerCharacters = true,
 		SavePlayers = false,
-		MaxThreads = 3,
+		MaxThreads = 2,
 		ShowStatus = true,
 		IgnoreDefaultProps = true,
 		IsolateStarterPlayer = true,
-		IsolatePlayerGui = true -- Dex++: save the LocalPlayer GUI too (SynSaveInstance IsolateLocalPlayer)
+		IsolatePlayerGui = true, -- Dex++: save the LocalPlayer GUI too (SynSaveInstance IsolateLocalPlayer)
+		AntiKick = true, -- Dex++: keep the client alive while saving (AntiIdle + light decompile)
+		KillAllScripts = false -- Dex++: freeze the game's scripts while saving (heavier, stops anti-cheat jitter)
 	}
 	
 	local function AddCheckbox(title, default)
@@ -13315,7 +13317,7 @@ local function main()
 			SaveInstanceArgs.DecompileTimeout = tonumber(decompileTimeout.TextBox.Text)
 		end)
 		
-		local decompileThread = AddTextbox("Decompiler Max Threads", "3", 15)
+		local decompileThread = AddTextbox("Decompiler Max Threads", "2", 15)
 		decompileThread.TextBox.FocusLost:Connect(function()
 			SaveInstanceArgs.MaxThreads = tonumber(decompileThread.TextBox.Text)
 		end)
@@ -13359,6 +13361,16 @@ local function main()
 		local IsolatePlayerGui = AddCheckbox("Isolate PlayerGui (save LocalPlayer GUI)", SaveInstanceArgs.IsolatePlayerGui)
 		IsolatePlayerGui.OnInput:Connect(function()
 			SaveInstanceArgs.IsolatePlayerGui = IsolatePlayerGui.Toggled
+		end)
+
+		local AntiKick = AddCheckbox("Anti-Kick (do not leave the game while saving)", SaveInstanceArgs.AntiKick)
+		AntiKick.OnInput:Connect(function()
+			SaveInstanceArgs.AntiKick = AntiKick.Toggled
+		end)
+
+		local KillScripts = AddCheckbox("Kill game scripts while saving", SaveInstanceArgs.KillAllScripts)
+		KillScripts.OnInput:Connect(function()
+			SaveInstanceArgs.KillAllScripts = KillScripts.Toggled
 		end)
 		
 		local IgnoreDefaultProps = AddCheckbox("Ignore Default Properties", SaveInstanceArgs.IgnoreDefaultProps)
@@ -14932,6 +14944,37 @@ Main = (function()
 				ssiOptions["IsModel"] = isModel
 				ssiOptions["Binary"] = binary
 				ssiOptions["AvoidFileOverwrite"] = false -- we already picked the exact name
+
+				-- ===== Dex++ ANTI-KICK =====
+				-- 'Leaving the game' during a save is the client being frozen/disconnected, or
+				-- SynSaveInstance's SafeMode disconnecting you on purpose. These defaults keep you
+				-- in the server: no self-disconnect, no idle kick, and the default Roblox player
+				-- scripts are skipped (decompiling them is the usual crash/kick cause).
+				local function pick(key, default)
+					local v = options[key]
+					if v == nil then return default end
+					return v
+				end
+
+				local antiKick = pick("AntiKick", true)
+				ssiOptions["SafeMode"] = false            -- never disconnect the LocalPlayer on purpose
+				ssiOptions["AntiIdle"] = true             -- block the 20 minute idle kick
+				ssiOptions["KillAllScripts"] = pick("KillAllScripts", false)
+				ssiOptions["BoostFPS"] = false            -- keep rendering (a black screen looks like a crash)
+				ssiOptions["ShutdownWhenDone"] = false
+
+				if antiKick then
+					ssiOptions["IgnoreDefaultPlayerScripts"] = true -- PlayerModule/ChatScript decompile crashes executors
+					ssiOptions["scriptcache"] = true                -- do not decompile the same script twice
+					ssiOptions["DecompileJobless"] = ssiOptions["DecompileJobless"] or false
+					ssiOptions["SaveCacheInterval"] = 0x1600 * 10   -- moderate memory use while saving
+					local timeout = tonumber(options["DecompileTimeout"]) or 10
+					if timeout < 5 then timeout = 5 end           -- too small = half-decompiled junk
+					ssiOptions["DecompileTimeout"] = timeout
+					local threads = tonumber(options["MaxThreads"]) or 3
+					if threads > 2 then threads = 2 end           -- 1-2 threads is what mobile survives
+					ssiOptions["MaxThreads"] = threads
+				end
 
 				if wantsPlayerGui and isModel == false then
 					ssiOptions["IsolateLocalPlayer"] = true   -- PlayerGui inside a "LocalPlayer" Folder
