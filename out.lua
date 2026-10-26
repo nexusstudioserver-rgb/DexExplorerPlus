@@ -2238,7 +2238,10 @@ local function main()
 			end
 			
 			if #sList == 1 then
-				Lib.SaveAsPrompt("Place_"..game.PlaceId.."_"..sList[1].Obj.ClassName.."_"..sList[1].Obj.Name.."_"..os.time()..".rbxm", function(filename)
+						-- Dex++ FIX: some Android file APIs mangle [ ] in names, so the file can end up
+				-- somewhere unexpected. Suggest a clean ASCII name.
+				local safeName = tostring(sList[1].Obj.Name):gsub("%[", "("):gsub("%]", ")"):gsub("[^%w%._%-() ]", "_")
+				Lib.SaveAsPrompt("Place_"..game.PlaceId.."_"..sList[1].Obj.ClassName.."_"..safeName.."_"..os.time()..".rbxm", function(filename)
 					env.saveinstance(sList[1].Obj, filename, {
 						Decompile = true,
 						RemovePlayerCharacters = false
@@ -14895,6 +14898,48 @@ Main = (function()
 				pcall(warn, msg)
 			end
 
+				-- Dex++ FIX: 'Saved' does not always mean the file exists where we asked.
+			-- Some executors (Solara) write into their own workspace folder, add a subfolder,
+			-- or silently drop the write. These two helpers prove where the file really is.
+			local function workspaceListing(limit)
+				if not env.listfiles then return {} end
+				local ok, entries = pcall(env.listfiles)
+				if not ok or type(entries) ~= "table" then return {} end
+				local out = {}
+				for i = 1, math.min(#entries, limit or 15) do out[#out + 1] = tostring(entries[i]) end
+				return out
+			end
+
+			local function findSavedFile(target)
+				if env.isfile then
+					local ok, exists = pcall(env.isfile, target)
+					if ok and exists then return target end
+				end
+				if not env.listfiles then return nil end
+				local base = tostring(target):match("([^/\\]+)$") or tostring(target)
+				local want = base:lower()
+				local wantStem = want:gsub("%.[%w]+$", "")
+				local function scan(dir, depth)
+					if depth > 4 then return nil end
+					local ok, entries = pcall(env.listfiles, dir)
+					if not ok or type(entries) ~= "table" then return nil end
+					for _, entry in ipairs(entries) do
+						local e = tostring(entry)
+						local name = e:match("([^/\\]+)[/\\]?$") or e
+						local lower = name:lower()
+						if lower == want then return e end
+						if lower:gsub("%.[%w]+$", "") == wantStem then return e end
+						if e:sub(-1) == "/" or e:sub(-1) == "\\" then
+							local found = scan(e, depth + 1)
+							if found then return found end
+						end
+					end
+					return nil
+				end
+				local found = scan(nil, 0)
+				return found
+			end
+
 			local function ensureFolder(filepath)
 				local folder = filepath:match("^(.*)[\\/][^\\/]+$")
 				if not folder or folder == "" or not env.makefolder or not env.isfolder then return end
@@ -14976,27 +15021,56 @@ Main = (function()
 				lastSave.counter = counter
 			end
 
+			if env.writefile == nil and env.listfiles == nil then
+				warn("[Dex++] this executor has NO file functions (writefile/listfiles) - a save can never reach your workspace")
+			end
+
 			local notes = "saved as " .. finalPath
 				local function done(result)
 					saveLog[obj] = { path = finalPath, time = os.clock(), counter = (lastSave and lastSave.counter) }
-					pcall(env.saveinstanceNotify, finalPath)
 
-					-- Dex++ FIX: verify instead of assuming. If the executor wrote nothing, say so.
-					local size
-					pcall(function()
-						if env.isfile and env.isfile(finalPath) and env.readfile then
-							size = #env.readfile(finalPath)
+					-- Dex++ FIX: do not trust the word 'saved' - find the file and measure it.
+					-- Some executors flush the write a moment after the call returns, so retry
+					-- briefly before declaring that nothing was written.
+					local real
+					for attempt = 1, 6 do
+						real = findSavedFile(finalPath)
+						if real then break end
+						if attempt < 6 and type(task) == "table" and type(task.wait) == "function" then
+							task.wait(0.25)
 						end
-					end)
-					if size == 0 then
-						warn("[Dex++] WARNING: " .. tostring(finalPath) .. " was created but is EMPTY")
-					elseif size then
-						local kb = size / 1024
+					end
+					local size
+					if real and env.readfile then
+						pcall(function() size = #env.readfile(real) end)
+					end
+
+					if real and real ~= finalPath then
+						warn("[Dex++] the executor wrote it to a different path: " .. tostring(real))
+						saveLog[obj].path = real
+					end
+
+					if not real then
+						-- THIS is the 'nothing in my workspace' case
+						warn("[Dex++] SAVE FAILED: nothing was written for \"" .. tostring(finalPath) .. "\"")
+						warn("[Dex++]   writefile available: " .. tostring(env.writefile ~= nil)
+							.. " | listfiles available: " .. tostring(env.listfiles ~= nil))
+						local listing = workspaceListing(12)
+						if #listing > 0 then
+							warn("[Dex++]   files the executor can see: " .. table.concat(listing, ", "))
+						else
+							warn("[Dex++]   the executor workspace is empty / listfiles(r) returned nothing")
+						end
+					elseif size == 0 then
+						warn("[Dex++] WARNING: " .. tostring(real) .. " was created but is EMPTY")
+					else
 						local how = "saved"
 						if dexNativeDecompile then how = "decompiled"
 						elseif dexDecompilerInstalled then how = "decompiled (fallback/bytecode)" end
-						local line = string.format("[Dex++] %s -> %s (%.1f KB)", how, finalPath, kb)
+						local line = string.format("[Dex++] %s -> %s (%s)", how, tostring(real),
+							size and string.format("%.1f KB", size / 1024) or "size unknown")
 						if rconsoleprint then pcall(rconsoleprint, line .. "\n") end
+						warn(line)   -- one line in the Developer Console: real path + size
 					end
 					return result
 				end
