@@ -15359,20 +15359,76 @@ Main = (function()
 				}
 			).Body
 		end
-		env.decompile = function(...)
-			if typeof(decompile) == "function" and Settings.Decompiler.PreferDecompilerFallback == false then
-				return decompile(...)
-			elseif typeof(getscriptbytecode) == "function" then
-				local fallbackMode = Settings.Decompiler.DecompilerFallback
-				
-				if fallbackMode == "Konstant" then
-					return KonstantDec(...)
-				elseif fallbackMode == "AdvancedDecompiler" then
-					return ADDec(...)
-				elseif  fallbackMode == "Shiny" then
-					return ShinyDec(...)
+		--[[ Dex++ FIX: decompile wrapper.
+		     Before this, if the executor had no `decompile` (Solara etc.) and the chosen
+		     fallback mode did not match, this returned nothing -> every script saved with
+		     an EMPTY Source ("it just saves and that's it").
+
+		     Now it always returns something readable, in this order:
+		       1. executor decompile()          (best)
+		       2. the fallback you picked in Settings
+		       3. raw getscriptbytecode()       (bytecode, still recoverable later)
+		       4. a clear message instead of silence ]] 
+		env.decompile = function(instance, ...)
+			local errors = {}
+			local extraCount = select("#", ...)
+			local extra = { ... }
+
+			local function try(label, fn)
+				if type(fn) ~= "function" then return nil end
+				local ok, result = pcall(fn)
+				if ok and type(result) == "string" and #result > 0 then
+					return result
+				end
+				errors[#errors + 1] = label .. ": " .. tostring(result)
+				return nil
+			end
+
+			-- 1) native decompiler
+			if typeof(decompile) == "function" or type(decompile) == "function" then
+				local result = try("decompile", function() return decompile(instance, table.unpack(extra, 1, extraCount)) end)
+				if result then return result end
+			end
+
+			-- 2) the fallback selected in Settings
+			local fallbacks = {
+				Konstant = function() return KonstantDec(instance, table.unpack(extra, 1, extraCount)) end,
+				AdvancedDecompiler = function() return ADDec(instance, table.unpack(extra, 1, extraCount)) end,
+				Shiny = function() return ShinyDec(instance, table.unpack(extra, 1, extraCount)) end,
+			}
+			local chosen = fallbacks[Settings.Decompiler.DecompilerFallback]
+			if chosen and typeof(getscriptbytecode) == "function" then
+				local result = try("fallback " .. tostring(Settings.Decompiler.DecompilerFallback), chosen)
+				if result then return result end
+			end
+
+			-- 2b) any other fallback that exists (some executors only expose one)
+			if typeof(getscriptbytecode) == "function" then
+				for name, fn in pairs(fallbacks) do
+					if name ~= Settings.Decompiler.DecompilerFallback then
+						local result = try("fallback " .. name, fn)
+						if result then return result end
+					end
 				end
 			end
+
+			-- 3) raw bytecode, so the script is not lost
+			if typeof(getscriptbytecode) == "function" then
+				local result = try("getscriptbytecode", function() return getscriptbytecode(instance) end)
+				if result then
+					return "--[==[ Dex++ could not decompile this script on this executor.\n"
+						.. "--[==[ Bytecode below - decompile it in a PC executor.\n"
+						.. tostring(result)
+						.. "\n]==]"
+				end
+			end
+
+			-- 4) explain instead of silence
+			return "--[==[ Dex++ could not get the source of: " .. tostring(instance and instance:GetFullName()) .. "\n"
+				.. "-- Executor supports decompile(): " .. tostring(typeof(decompile) == "function") .. "\n"
+				.. "-- Executor supports getscriptbytecode(): " .. tostring(typeof(getscriptbytecode) == "function") .. "\n"
+				.. (errors[1] and ("-- First error: " .. errors[1] .. "\n") or "")
+				.. "]==]"
 		end
 		
 		--[[if Main.Elevated then
