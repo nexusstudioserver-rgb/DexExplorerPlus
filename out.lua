@@ -2221,6 +2221,22 @@ local function main()
 
 		context:Register("SAVE_INST",{Name = "Save to File", IconMap = Explorer.MiscIcons, Icon = "Save", OnClick = function()
 			local sList = selection.List
+			
+			-- Dex++ FIX: the Explorer tree can list the SAME instance more than once
+			-- (Backpack duplicates), which caused a save loop that spammed 30 identical
+			-- files. De-duplicate by instance first.
+			do
+				local seen, unique = {}, {}
+				for i = 1, #sList do
+					local obj = sList[i] and sList[i].Obj
+					if obj and not seen[obj] then
+						seen[obj] = true
+						unique[#unique + 1] = sList[i]
+					end
+				end
+				sList = unique
+			end
+			
 			if #sList == 1 then
 				Lib.SaveAsPrompt("Place_"..game.PlaceId.."_"..sList[1].Obj.ClassName.."_"..sList[1].Obj.Name.."_"..os.time()..".rbxm", function(filename)
 					env.saveinstance(sList[1].Obj, filename, {
@@ -2232,7 +2248,9 @@ local function main()
 				for i = 1,#sList do
 					-- sList[i].Obj.Name.." ("..sList[1].Obj.ClassName..")"
 					-- "Place_"..game.PlaceId.."_"..sList[1].Obj.ClassName.."_"..sList[i].Obj.Name.."_"..os.time()
-					Lib.SaveAsPrompt("Place_"..game.PlaceId.."_"..sList[i].Obj.ClassName.."_"..sList[i].Obj.Name.."_"..os.time()..".rbxm", function(filename)
+					-- index suffix so two items saved in the same second cannot share a name
+					local safeItemName = tostring(sList[i].Obj.Name):gsub("[^%w_%-]", "_")
+					Lib.SaveAsPrompt("Place_"..game.PlaceId.."_"..sList[i].Obj.ClassName.."_"..safeItemName.."_"..i.."_"..os.time()..".rbxm", function(filename)
 						env.saveinstance(sList[i].Obj, filename, {
 							Decompile = true,
 							RemovePlayerCharacters = false
@@ -14864,8 +14882,15 @@ Main = (function()
 			env.FixSavePath = fixSavePath
 
 			-- confirmation in the executor console so you can see the real file name
+			local notifyTimes = {}
 			env.saveinstanceNotify = function(path)
-				local msg = "[Dex++] Saved instance -> " .. tostring(path)
+				local key = tostring(path)
+				local t = os.clock()
+				if notifyTimes[key] and (t - notifyTimes[key]) < 2 then
+					return -- do not spam the console for the same file
+				end
+				notifyTimes[key] = t
+				local msg = "[Dex++] Saved instance -> " .. key
 				if rconsoleprint then pcall(rconsoleprint, msg .. "\n") end
 				pcall(warn, msg)
 			end
@@ -14885,7 +14910,11 @@ Main = (function()
 				end
 			end
 
-			env.saveinstance = function(obj, filepath, options)
+			-- shared across calls: spam guard + notify throttling
+		local dexSaveLog = {}
+		local dexNotifyTimes = {}
+
+		env.saveinstance = function(obj, filepath, options)
 				options = options or {}
 
 				local isModel = options.IsModel
@@ -14911,8 +14940,38 @@ Main = (function()
 				forceSyn = true
 			end
 
+			-- Dex++ FIX: save-spam guard.
+			-- The same instance can be handed to us many times in a second (duplicate Explorer
+			-- selection entries, save loops). Before, each call overwrote the same file and
+			-- flooded the console. Now: same object + same target within SPAM_WINDOW seconds
+			-- is skipped, and genuinely repeated saves get a (2), (3) ... suffix instead of
+			-- silently overwriting.
+			local SPAM_WINDOW = 3
+			local saveLog = dexSaveLog
+			local now = os.clock()
+			local lastSave = saveLog[obj]
+			if lastSave then
+				if lastSave.path == finalPath and (now - lastSave.time) < SPAM_WINDOW then
+					lastSave.skipped = (lastSave.skipped or 0) + 1
+					return false, "skipped duplicate save of the same instance" -- silent: no 30x console spam
+				end
+			end
+
+			-- never overwrite a file we already wrote in this session: pick the next free name
+			if lastSave and lastSave.path == finalPath then
+				local counter = lastSave.counter or 1
+				local base = finalPath:gsub("%.[%w]+$", "")
+				local ext = finalPath:match("%.[%w]+$") or ""
+				repeat
+					counter = counter + 1
+					finalPath = base .. "_" .. counter .. ext
+				until not (env.isfile and env.isfile(finalPath))
+				lastSave.counter = counter
+			end
+
 			local notes = "saved as " .. finalPath
 				local function done(result)
+					saveLog[obj] = { path = finalPath, time = os.clock(), counter = (lastSave and lastSave.counter) }
 					pcall(env.saveinstanceNotify, finalPath)
 					return result
 				end
