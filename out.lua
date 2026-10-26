@@ -14910,9 +14910,16 @@ Main = (function()
 				end
 			end
 
-			-- shared across calls: spam guard + notify throttling
+			-- shared across calls: spam guard + notify throttling + executor saveinstance health
 		local dexSaveLog = {}
 		local dexNotifyTimes = {}
+		local dexBuiltInFailures = 0
+		local dexDecompilerInstalled = false
+
+		-- Dex++ FIX: remember the executor's REAL decompiler before we (possibly) publish our
+		-- wrapper as the global `decompile` (otherwise the wrapper would call itself forever).
+		-- Declared HERE so env.decompile and env.saveinstance share the same upvalue.
+		local dexNativeDecompile = (type(decompile) == "function") and decompile or nil
 
 		env.saveinstance = function(obj, filepath, options)
 				options = options or {}
@@ -14973,14 +14980,42 @@ Main = (function()
 				local function done(result)
 					saveLog[obj] = { path = finalPath, time = os.clock(), counter = (lastSave and lastSave.counter) }
 					pcall(env.saveinstanceNotify, finalPath)
+
+					-- Dex++ FIX: verify instead of assuming. If the executor wrote nothing, say so.
+					local size
+					pcall(function()
+						if env.isfile and env.isfile(finalPath) and env.readfile then
+							size = #env.readfile(finalPath)
+						end
+					end)
+					if size == 0 then
+						warn("[Dex++] WARNING: " .. tostring(finalPath) .. " was created but is EMPTY")
+					elseif size then
+						local kb = size / 1024
+						local how = "saved"
+						if dexNativeDecompile then how = "decompiled"
+						elseif dexDecompilerInstalled then how = "decompiled (fallback/bytecode)" end
+						local line = string.format("[Dex++] %s -> %s (%.1f KB)", how, finalPath, kb)
+						if rconsoleprint then pcall(rconsoleprint, line .. "\n") end
+					end
 					return result
 				end
 
 				-- 1) the executor's own saveinstance (fastest, best binary support)
-				if saveinstance and not forceSyn then
+				-- Dex++ FIX: some executors ship a broken saveinstance (Solara reports
+				-- "init:755: attempt to index boolean with 'DECODE'") and its error message is
+				-- ~10000 characters, which filled the console with stack traces. Now: one short
+				-- line, and the built-in is skipped after it has failed twice this session.
+				if saveinstance and not forceSyn and dexBuiltInFailures < 2 then
 					local s, result = pcall(saveinstance, obj, finalPath, options)
 					if s then return done(result) end
-					warn("[Dex++] built-in saveinstance failed (" .. tostring(result) .. "), using SynSaveInstance instead")
+					dexBuiltInFailures = dexBuiltInFailures + 1
+					local shown = tostring(result):gsub("%s+", " ")
+					if #shown > 200 then shown = shown:sub(1, 200) .. " ..." end
+					warn("[Dex++] executor saveinstance failed (" .. shown .. ") -> using SynSaveInstance")
+					if dexBuiltInFailures >= 2 then
+						warn("[Dex++] executor saveinstance is broken here - skipping it for the rest of this session")
+					end
 				end
 
 				-- 2) SynSaveInstance fallback (the same script Dex already used)
@@ -15039,6 +15074,34 @@ Main = (function()
 					ssiOptions["IsolateLocalPlayer"] = true   -- PlayerGui inside a "LocalPlayer" Folder
 					ssiOptions["SaveNotCreatable"] = true
 					ssiOptions["IsolatePlayers"] = false       -- must stay off or SSI ignores IsolateLocalPlayer
+				end
+
+				-- ===== Dex++ FIX: give SynSaveInstance a working decompiler =====
+				-- Upstream Dex never publishes env.decompile to the global env, so on an executor
+				-- without a native decompiler SynSaveInstance sees `decompile == nil` and writes
+				-- "-- Your Executor does NOT have a Decompiler" (or nothing) into every script.
+				-- We publish our wrapper (native -> Konstant/Advanced/Shiny over HTTP -> bytecode,
+				-- never nil) so scripts really contain something.
+				if not dexDecompilerInstalled then
+					local current = getgenv().decompile
+					if current == nil then current = decompile end
+					if type(current) ~= "function" then
+						local okInstall = pcall(function() getgenv().decompile = env.decompile end)
+						if not okInstall then pcall(function() _G.decompile = env.decompile end) end
+						dexDecompilerInstalled = true
+					end
+				end
+
+				-- Dex++ FIX: when there is no native decompiler, also store the bytecode as a
+				-- base64 comment so a script is never saved empty (decompile it later on a PC).
+				local hasBytecode = (type(env.getscriptbytecode) == "function") or (type(getscriptbytecode) == "function")
+				local b64 = (type(base64encode) == "function") and base64encode or nil
+				if not b64 then
+					local g = getgenv()
+					b64 = (g and type(g.base64encode) == "function") and g.base64encode or nil
+				end
+				if ssiOptions["SaveBytecode"] == nil then
+					ssiOptions["SaveBytecode"] = hasBytecode and (b64 ~= nil) and (dexNativeDecompile == nil)
 				end
 
 				local s, result = pcall(synsaveinstance, ssiOptions)
@@ -15444,8 +15507,8 @@ Main = (function()
 			end
 
 			-- 1) native decompiler
-			if typeof(decompile) == "function" or type(decompile) == "function" then
-				local result = try("decompile", function() return decompile(instance, table.unpack(extra, 1, extraCount)) end)
+			if dexNativeDecompile then
+				local result = try("decompile", function() return dexNativeDecompile(instance, table.unpack(extra, 1, extraCount)) end)
 				if result then return result end
 			end
 
@@ -15484,7 +15547,7 @@ Main = (function()
 
 			-- 4) explain instead of silence
 			return "--[==[ Dex++ could not get the source of: " .. tostring(instance and instance:GetFullName()) .. "\n"
-				.. "-- Executor supports decompile(): " .. tostring(typeof(decompile) == "function") .. "\n"
+				.. "-- Executor supports decompile(): " .. tostring(dexNativeDecompile ~= nil) .. "\n"
 				.. "-- Executor supports getscriptbytecode(): " .. tostring(typeof(getscriptbytecode) == "function") .. "\n"
 				.. (errors[1] and ("-- First error: " .. errors[1] .. "\n") or "")
 				.. "]==]"
