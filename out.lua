@@ -14729,6 +14729,9 @@ Main = (function()
 			options["FilePath"] = filepath
 			options["Object"] = obj
 			options["IsModel"] = not wholePlace
+			-- [readme-fix] SynSaveInstance defaults ReadMe = true, which injects an extra
+			-- Script named "README" at the top of every save. You only want the assets.
+			options["ReadMe"] = false
 			return options
 		end
 
