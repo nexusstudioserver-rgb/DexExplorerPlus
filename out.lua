@@ -14806,7 +14806,13 @@ Main = (function()
 				RepoURL = "https://raw.githubusercontent.com/luau/SynSaveInstance/main/",
 				SSI = "saveinstance",
 			}
-			local synsaveinstance = loadstring(oldgame:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
+			-- [urlfix] guarded: this used to throw a bare "Argument 1 missing or nil" inside HttpGet
+			-- when the request failed, which looked like a Dex bug rather than a network problem.
+			local okDl, body = pcall(function() return oldgame:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true) end)
+			if not okDl or type(body) ~= "string" or #body < 1000 then
+				error("[Dex++] Could not download SynSaveInstance (saveinstance.luau). Save to File will not work this session.", 0)
+			end
+			local synsaveinstance = loadstring(body, Params.SSI)()
 
 			local function wrappedsaveinstance(obj, filepath, options)
 				options = normalizeInstanceSave(obj, filepath, options)
@@ -15182,7 +15188,21 @@ Main = (function()
 				if not downloaded and XD then XD() end
 			end)
 			-- lmfao async makes it work to load big file
-			rawAPI = rawAPI or game:HttpGet("http://setup.roblox.com/"..Main.RobloxVersion.."-API-Dump.json")
+			-- [urlfix] guard the URL: never build it from a nil RobloxVersion
+			if not rawAPI then
+				local ver = Main.RobloxVersion
+				if type(ver) == "string" and ver ~= "" then
+					local okDl, body = pcall(function() return game:HttpGet("https://setup.roblox.com/"..ver.."-API-Dump.json") end)
+					if okDl and type(body) == "string" and #body > 1000 then rawAPI = body end
+				end
+			end
+			if not rawAPI then
+				-- [urlfix] second source that needs no version number at all
+				local okMirror, body = pcall(function()
+					return game:HttpGet("https://raw.githubusercontent.com/MaximumADHD/Roblox-Client-Tracker/roblox/API-Dump.json")
+				end)
+				if okMirror and type(body) == "string" and #body > 1000 then rawAPI = body end
+			end
 		else
 			if script:FindFirstChild("API") then
 				rawAPI = require(script.API)
@@ -15193,6 +15213,10 @@ Main = (function()
 		downloaded = true
 		
 		Main.RawAPI = rawAPI
+		-- [urlfix] never call JSONDecode(nil): report a readable error instead
+		if type(rawAPI) ~= "string" or #rawAPI < 1000 then
+			error("[Dex++] Could not download the Roblox API dump (network/executor blocked it). Properties and Insert Object will be limited.", 0)
+		end
 		api = service.HttpService:JSONDecode(rawAPI)
 
 		local classes,enums = {},{}
@@ -15332,7 +15356,19 @@ Main = (function()
 					Main.DepsVersionData[1] = ""
 				end
 			end
-			rawXML = rawXML or game:HttpGet("https://raw.githubusercontent.com/CloneTrooper1019/Roblox-Client-Tracker/roblox/ReflectionMetadata.xml")
+			-- [urlfix] guarded, with a second mirror: a dead host must not kill the loader
+			if not rawXML then
+				for _, url in ipairs({
+					"https://raw.githubusercontent.com/CloneTrooper1019/Roblox-Client-Tracker/roblox/ReflectionMetadata.xml",
+					"https://raw.githubusercontent.com/MaximumADHD/Roblox-Client-Tracker/roblox/ReflectionMetadata.xml",
+				}) do
+					local okDl, body = pcall(function() return game:HttpGet(url) end)
+					if okDl and type(body) == "string" and #body > 1000 then rawXML = body break end
+				end
+			end
+			if not rawXML then
+				error("[Dex++] Could not download ReflectionMetadata (network/executor blocked it). Re-run, or install a cached copy.", 0)
+			end
 		else
 			if script:FindFirstChild("RMD") then
 				rawXML = require(script.RMD)
@@ -15921,7 +15957,33 @@ Main = (function()
 				end
 			end
 			
-			Main.RobloxVersion = Main.RobloxVersion or oldgame:HttpGet("https://clientsettings.roblox.com/v2/client-version/WindowsStudio64/channel/LIVE"):match("(version%-[%w]+)")
+			-- [urlfix] This used to be one unguarded chain:
+			--   Main.RobloxVersion = Main.RobloxVersion or oldgame:HttpGet(<clientsettings>):match(...)
+			-- If that request fails (executor HttpGet quirks, rate limit, no reply) RobloxVersion
+			-- stays nil, and the later "http://setup.roblox.com/"..RobloxVersion.."-API-Dump.json"
+			-- threw "attempt to concatenate nil with string" -- reported by the executor as
+			-- "Argument 1 missing or nil" inside HttpGet. Look it up safely and always fall back.
+			local function fetchVersionFrom(host)
+				local okCall, body = pcall(function() return oldgame:HttpGet(host) end)
+				if not okCall or type(body) ~= "string" then return nil end
+				local ver = body:match("(version%-[%w]+)")
+				return ver
+			end
+			if not Main.RobloxVersion then
+				Main.RobloxVersion = fetchVersionFrom("https://clientsettings.roblox.com/v2/client-version/WindowsStudio64/channel/LIVE")
+					or fetchVersionFrom("https://clientsettings.roblox.com/v2/client-version/WindowsPlayer/channel/LIVE")
+					or fetchVersionFrom("https://clientsettings.roblox.com/v2/client-version/MacStudio64/channel/LIVE")
+			end
+			if not Main.RobloxVersion then
+				local okVer, ver = pcall(function() return tostring(Version()) end)
+				local verStr = okVer and ver or nil
+				Main.RobloxVersion = type(verStr) == "string" and verStr:match("(version%-[%w]+)") or nil
+			end
+			if not Main.RobloxVersion then
+				-- last resort: ask Roblox what the current live version is, via the deploy endpoint
+				Main.RobloxVersion = "version-0000000000000000"
+				warn("[Dex++] could not determine the Roblox version; API dump may be incomplete")
+			end
 		end
 
 		-- Fetch external deps
