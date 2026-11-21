@@ -1652,6 +1652,12 @@ local function main()
 
 		-- Nil Handling
 		if not par then
+			-- [hidden-fix] An object can spawn with Parent = nil (hidden spawners, admin tools,
+			-- objects waiting to be re-parented). Stock Dex dropped it and every child it got
+			-- later. If the executor can list nil instances, track it instead of dropping it.
+			if not nilMap[root] and env.getnilinstances then
+				nilMap[root] = true
+			end
 			if nilMap[root] then
 				nilCons[root] = nilCons[root] or {
 					connectSignal(root.ChildAdded,addObject),
@@ -1662,7 +1668,7 @@ local function main()
 			else
 				return
 			end
-		elseif nilMap[rootParObj] or par == nilNode then
+		elseif nilMap[root.Parent] or par == nilNode then -- [hidden-fix] was rootParObj (stale)
 			nilMap[root] = true
 			nilCons[root] = nilCons[root] or {
 				connectSignal(root.ChildAdded,addObject),
@@ -2243,6 +2249,23 @@ local function main()
 		return newEntry
 	end
 
+	-- [hidden-fix] is this object invisible to the player? drives the "(hidden)" marker
+	local function isHiddenObject(obj)
+		local ok, res = pcall(function()
+			if obj:IsA("BasePart") then
+				if obj.Transparency >= 1 then return true end
+				local okLtm, ltm = pcall(function() return obj.LocalTransparencyModifier end)
+				return okLtm and ltm >= 1
+			elseif obj:IsA("GuiObject") then
+				return obj.Visible == false
+			elseif obj:IsA("LayerCollector") then
+				return obj.Enabled == false
+			end
+			return false
+		end)
+		return ok and res == true
+	end
+
 	Explorer.Refresh = function()
 		local maxNodes = math.max(math.ceil((treeFrame.AbsoluteSize.Y) / 20), 0)	
 		local renameNodeVisible = false
@@ -2260,7 +2283,12 @@ local function main()
 				entry.Visible = true
 				entry.Position = UDim2.new(0,-scrollH.Index,0,entry.Position.Y.Offset)
 				entry.Size = UDim2.new(0,Explorer.ViewWidth,0,20)
-				entry.Indent.EntryName.Text = tostring(node.Obj)
+				-- [hidden-fix] invisible spawns are hard to spot, so label them
+				if isHiddenObject(obj) then
+					entry.Indent.EntryName.Text = tostring(node.Obj) .. "  (hidden)"
+				else
+					entry.Indent.EntryName.Text = tostring(node.Obj)
+				end
 				entry.Indent.Position = UDim2.new(0,depth,0,0)
 				entry.Indent.Size = UDim2.new(1,-depth,1,0)
 
@@ -6571,15 +6599,16 @@ local function main()
 	
 	local SaveInstanceArgs = {
 		Decompile = true,
-		DecompileTimeout = 10,
-		DecompileIgnore = {"Chat", "CoreGui", "CorePackages"},
+		DecompileTimeout = 60, -- big maps: 60s per script so huge scripts finish instead of timing out
+		DecompileIgnore = {"Chat", "CoreGui", "CorePackages", "TextChatService"},
 		NilInstances = false,
 		RemovePlayerCharacters = true,
 		SavePlayers = false,
 		MaxThreads = 3,
 		ShowStatus = true,
 		IgnoreDefaultProps = true,
-		IsolateStarterPlayer = true
+		IsolateStarterPlayer = true,
+		SaveNotCreatable = true -- keep ReplicatedStorage items of not-creatable classes
 	}
 	
 	local function AddCheckbox(title, default)
@@ -6772,6 +6801,19 @@ local function main()
 		ShowStat.OnInput:Connect(function()
 			SaveInstanceArgs.ShowStatus = ShowStat.Toggled
 		end)
+		
+		-- [keep-all] keep everything under ReplicatedStorage, including classes Studio
+		-- normally refuses to create (they are saved as Folders instead)
+		local KeepUncreatable = AddCheckbox("Keep Uncreatable Objects (ReplicatedStorage)", SaveInstanceArgs.SaveNotCreatable)
+		KeepUncreatable.OnInput:Connect(function()
+			SaveInstanceArgs.SaveNotCreatable = KeepUncreatable.Toggled
+		end)
+		
+		local keepArchivable = AddCheckbox("Include Archivable = false Objects", true)
+		keepArchivable.OnInput:Connect(function()
+			SaveInstanceArgs.IgnoreNotArchivable = keepArchivable.Toggled
+		end)
+		SaveInstanceArgs.IgnoreNotArchivable = true
 		
 		
 		-- Decompile buttons below
@@ -14729,9 +14771,32 @@ Main = (function()
 			options["FilePath"] = filepath
 			options["Object"] = obj
 			options["IsModel"] = not wholePlace
+			if wholePlace then
+				-- [bigmap] StreamingEnabled means geometry outside the stream radius does not
+				-- exist on your client: no save tool can include it. One warning, then it saves.
+				local okStream, streaming = pcall(function() return workspace.StreamingEnabled end)
+				if okStream and streaming then
+					task.spawn(warn, "[Dex++] StreamingEnabled is ON: parts outside the stream radius are not on your client, so this save will be PARTIAL. Walk/fly the map first to load more of it.")
+				end
+			end
 			-- [readme-fix] SynSaveInstance defaults ReadMe = true, which injects an extra
 			-- Script named "README" at the top of every save. You only want the assets.
 			options["ReadMe"] = false
+			-- [keep-all] Do not silently drop ReplicatedStorage content.
+			-- SynSaveInstance skips instances whose Archivable = false (games and plugins set this
+			-- on their own modules/models) and skips "not creatable" classes outright. Both look
+			-- like "some of their stuff is no longer included". Force them in.
+			options["IgnoreNotArchivable"] = true -- save hidden-published stuff that is still in the tree
+			if options["SaveNotCreatable"] == nil then options["SaveNotCreatable"] = true end
+			-- not-creatable classes become plain Folders that Studio can actually create
+			local fixes = options["NotCreatableFixes"]
+			if fixes == nil then
+				options["NotCreatableFixes"] = {
+					"Player", "PlayerGui", "PlayerMouse", "PlayerScripts", "TouchTransmitter",
+					"TextChatMessage", "TextSource", "Translator", "ScreenshotHud", "StudioData",
+					"AdvancedDragger", "Dragger", "AnimationTrack",
+				}
+			end
 			return options
 		end
 
@@ -15429,7 +15494,7 @@ Main = (function()
 			end)
 		end
 
-		local ti = TweenInfo.new(0.4,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
+		local ti = TweenInfo.new(0.25,Enum.EasingStyle.Quad,Enum.EasingDirection.Out) -- [fastload] snappier reveal
 		tweenNumber(100,ti,function(val)
 			val = val/200
 			local start = NumberSequenceKeypoint.new(0,0)
@@ -15930,7 +15995,7 @@ Main = (function()
 		-- Done
 		intro.SetProgress("Complete",1)
 		coroutine.wrap(function()
-			Lib.FastWait(1.25)
+			Lib.FastWait(0.25) -- [fastload] was 1.25s of pure dead time before the windows appeared
 			intro.Close()
 		end)()
 
