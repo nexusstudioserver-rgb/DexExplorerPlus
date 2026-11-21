@@ -14802,15 +14802,30 @@ Main = (function()
 
 		local function loadSynSaveInstance()
 			if game:GetService("RunService"):IsStudio() then return function() error("Cannot run in Roblox Studio!") end end
+			-- [ssi-mirror] luau/SynSaveInstance is GONE (404). The project moved to
+			-- rbxlx/UniversalSynSaveInstance. Try every known home, newest first.
 			local Params = {
-				RepoURL = "https://raw.githubusercontent.com/luau/SynSaveInstance/main/",
 				SSI = "saveinstance",
+				RepoURLs = {
+					"https://raw.githubusercontent.com/rbxlx/UniversalSynSaveInstance/main/saveinstance.luau",
+					"https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/main/saveinstance.luau",
+					"https://raw.githubusercontent.com/luau/SynSaveInstance/main/saveinstance.luau",
+					"https://raw.githubusercontent.com/TAOxTuna/UniversalSynSaveInstance/main/saveinstance.luau",
+				},
 			}
 			-- [urlfix] guarded: this used to throw a bare "Argument 1 missing or nil" inside HttpGet
 			-- when the request failed, which looked like a Dex bug rather than a network problem.
-			local okDl, body = pcall(function() return oldgame:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true) end)
-			if not okDl or type(body) ~= "string" or #body < 1000 then
-				error("[Dex++] Could not download SynSaveInstance (saveinstance.luau). Save to File will not work this session.", 0)
+			local body, lastErr
+			for _, url in ipairs(Params.RepoURLs) do
+				local okDl, res = pcall(function() return oldgame:HttpGet(url, true) end)
+				if okDl and type(res) == "string" and #res > 20000 and not res:find("^404") then
+					body = res
+					break
+				end
+				lastErr = res
+			end
+			if not body then
+				error("[Dex++] Could not download the save engine (saveinstance.luau) from any mirror. Save to File will not work this session. Last error: " .. tostring(lastErr), 0)
 			end
 			local synsaveinstance = loadstring(body, Params.SSI)()
 
@@ -14972,20 +14987,54 @@ Main = (function()
 				}
 			).Body
 		end
-		env.decompile = function(...)
-			if typeof(decompile) == "function" and Settings.Decompiler.PreferDecompilerFallback == false then
-				return decompile(...)
-			elseif typeof(getscriptbytecode) == "function" then
+		-- [dec-fix] Some scripts came back empty because the chain only trusted the FIRST
+			-- function that existed: if the executor's decompile() existed but returned nil/"",
+			-- Dex accepted that and the script stayed blank. Now every tier is tried and the
+			-- first real result wins.
+			local decTried = {}
+			local ERROR_MARKERS = {
+				"The Script is Empty", "Failed to get script bytecode", "Error occurred while requesting",
+				"Failed to load Advanced Decompiler", "decompiler is not active", "crypt' library is missing",
+				"could not decompile", "Decompiling is disabled", "Not found in already decompiled",
+				"Decompiler timed out",
+			}
+			local function decUseful(res)
+				if type(res) ~= "string" then return false end
+				if #res:gsub("%s", "") < 1 then return false end
+				for _, marker in ipairs(ERROR_MARKERS) do
+					if res:find(marker, 1, true) then return false end
+				end
+				return true
+			end
+			env.decompile = function(...)
+			local nativeDec = (typeof(decompile) == "function") and decompile or nil
+			if nativeDec and Settings.Decompiler.PreferDecompilerFallback == false then
+				local okNative, nativeRes = pcall(nativeDec, ...)
+				if okNative and decUseful(nativeRes) then return nativeRes end
+				decTried[#decTried+1] = "native:" .. tostring(not okNative and nativeRes or "empty")
+			end
+			if typeof(getscriptbytecode) == "function" then
 				local fallbackMode = Settings.Decompiler.DecompilerFallback
 				
-				if fallbackMode == "Konstant" then
-					return KonstantDec(...)
-				elseif fallbackMode == "AdvancedDecompiler" then
-					return ADDec(...)
-				elseif  fallbackMode == "Shiny" then
-					return ShinyDec(...)
+				-- [dec-fix] try the configured fallback, then the others, before giving up
+				local order = {fallbackMode, "Konstant", "AdvancedDecompiler", "Shiny"}
+				local seen = {}
+				local arg1, arg2 = ...
+				for _, mode in ipairs(order) do
+					if not seen[mode] then
+						seen[mode] = true
+						local okMode, modeRes = pcall(function()
+							if mode == "Konstant" then return KonstantDec(arg1, arg2)
+							elseif mode == "AdvancedDecompiler" then return ADDec(arg1, arg2)
+							elseif mode == "Shiny" then return ShinyDec(arg1) end
+						end)
+						if okMode and decUseful(modeRes) then return modeRes end
+						decTried[#decTried+1] = mode .. ":" .. tostring(okMode and "empty" or modeRes)
+					end
 				end
+				return "-- Dex++ could not decompile this script.\n-- Tried: " .. table.concat(decTried, " | ")
 			end
+			return "-- Dex++ has no decompiler available in this executor (no decompile() and no getscriptbytecode())"
 		end
 		
 		--[[if Main.Elevated then
