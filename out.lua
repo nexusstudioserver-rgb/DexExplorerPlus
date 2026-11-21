@@ -14757,6 +14757,23 @@ Main = (function()
 		env.makefolder = makefolder
 		env.listfiles = listfiles
 		env.loadfile = loadfile
+		-- [size] Read the file back so we can say how big it really is. "Saved" alone does not
+		-- tell you whether anything was written (a 0-byte or 12-byte .rbxm opens in Studio as
+		-- an empty place, which looks exactly like "it didn't work").
+		local function savedFileInfo(path)
+			if type(path) ~= "string" then return "size unknown" end
+			local okF, isf = pcall(function() return isfile(path) end)
+			if not okF or not isf then
+				return "NOT FOUND on disk (maybe a different folder)"
+			end
+			local okR, data = pcall(function() return readfile(path) end)
+			if not okR or type(data) ~= "string" then return "exists (size unreadable)" end
+			if #data < 1024 then
+				return string.format("EMPTY - only %d bytes were written, nothing usable", #data)
+			end
+			return string.format("%.1f KB", #data / 1024)
+		end
+
 		-- [rbxm] every save is a Roblox Studio file: one instance/model -> .rbxm, whole place -> .rbxl
 		local function normalizeInstanceSave(obj, filepath, options)
 			options = options or {}
@@ -14835,7 +14852,7 @@ Main = (function()
 				if options["AntiIdle"] == nil then options["AntiIdle"] = true end
 				if options["ShutdownWhenDone"] == nil then options["ShutdownWhenDone"] = false end
 				local result = synsaveinstance(options)
-				task.spawn(warn, string.format("[Dex++] Saved %s -> %s", ((obj == game) or (obj == workspace.Parent)) and "place" or "instance", tostring(options["FilePath"])))
+				task.spawn(warn, string.format("[Dex++] Saved %s -> %s  [%s]", ((obj == game) or (obj == workspace.Parent)) and "place" or "instance", tostring(options["FilePath"]), savedFileInfo(options["FilePath"])))
 				return result
 			end
 
@@ -14852,7 +14869,7 @@ Main = (function()
 				local ok, result = pcall(native, options)
 				if not ok then ok, result = pcall(native, options["Object"], options["FilePath"], options) end
 				if ok then
-					task.spawn(warn, string.format("[Dex++] Saved %s -> %s", wholePlace and "place" or "instance", tostring(options["FilePath"])))
+					task.spawn(warn, string.format("[Dex++] Saved %s -> %s  [%s]", wholePlace and "place" or "instance", tostring(options["FilePath"]), savedFileInfo(options["FilePath"])))
 					return result
 				end
 				warn("[Dex++] built-in saveinstance failed, retrying with SynSaveInstance: " .. tostring(result))
